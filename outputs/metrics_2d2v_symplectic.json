@@ -1,0 +1,9 @@
+{
+ "mode": "symplectic",
+ "params": 39968,
+ "final_rel_l2": 0.05295895040035248,
+ "rel_mass_drift": 3.7542415611824254e-06,
+ "rel_energy_drift": 0.009515120647847652,
+ "momentum_drift": 0.12249040603637695,
+ "train_time": 5508.091068506241
+}
