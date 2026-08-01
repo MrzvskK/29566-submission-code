@@ -4,8 +4,7 @@ Ports the *headline* configuration only: the symplectic (det ∇Psi = 1 exactly)
 flow map, trained with the Ampere + energy-drift conservation penalties and
 support-weighted collocation sampling, plus the classical Strang-splitting
 spectral semi-Lagrangian reference solver. Normalizing/soft flow-map modes and
-the tensor-grid velocity quadrature ablation are intentionally out of scope
-(see `to_be_submitted_v3/slpinn_2d2v.py` for those).
+the tensor-grid velocity quadrature ablation are intentionally out of scope.
 
 This file exists to make the *training loop* JIT-compiled end to end (model
 forward, forward-mode jvp residual, spectral Poisson solve, conservation
@@ -49,9 +48,7 @@ F32 = jnp.float32
 F64 = jnp.float64
 
 
-# ---------------------------------------------------------------------------
-# device helpers
-# ---------------------------------------------------------------------------
+### device helpers
 
 def gpu_device():
     gpus = jax.devices("gpu")
@@ -88,10 +85,8 @@ def device_memory_stats(dev) -> dict:
 def peak_rss_bytes() -> int:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
 
-
-# ---------------------------------------------------------------------------
-# problem definitions
-# ---------------------------------------------------------------------------
+    
+### problem definitions
 
 def _wrap(x, lo: float, hi: float):
     return jnp.mod(x - lo, hi - lo) + lo
@@ -188,10 +183,9 @@ def make_problem(name: str) -> Problem:
     return _PROBLEMS[name]()
 
 
-# ---------------------------------------------------------------------------
-# spectral Poisson (periodic 2D grid) -- always a FIXED small field_nx grid,
-# never a function of the classical solver's comparison resolution N.
-# ---------------------------------------------------------------------------
+### spectral Poisson (periodic 2D grid) 
+### -- always a FIXED small field_nx grid, never a function of the classical solver's comparison resolution N.
+
 
 def wavenumbers(n: int, length: float, dtype=F32):
     return (2.0 * jnp.pi * jnp.fft.fftfreq(n, d=length / n)).astype(dtype)
@@ -293,11 +287,9 @@ def rotate_qmc_nodes(base_u, key, mean, sigma):
     return v, w
 
 
-# ---------------------------------------------------------------------------
 # field evaluation on a fixed small (field_nx, field_nx) spatial grid crossed
 # with an importance-sampled velocity point cloud -- 2D, not 4D, and constant
 # cost regardless of the classical solver's N (see module docstring).
-# ---------------------------------------------------------------------------
 
 def eval_on_nodes_2d(f_fn, t_slices, x_grids, v_nodes):
     nt, nx, ny, m = t_slices.shape[0], x_grids[0].shape[0], x_grids[1].shape[0], v_nodes.shape[0]
@@ -339,13 +331,12 @@ def moments_on_grid_2d(f_fn, t_slices, x_grids, v_grids, v_weights):
     return rho, jnp.stack([jx, jy], axis=1), kin
 
 
-# ---------------------------------------------------------------------------
-# flow-map model (Equinox) -- symplectic (det = 1) coupling flow only.
+
+### flow-map model (Equinox) -- symplectic (det = 1) coupling flow only.
 #
 # Written UNBATCHED (single t: scalar, z: [d]); batching is done by jax.vmap
 # at call sites (the same idiom the torch version already uses for its
 # Jacobian via vmap(jacrev(...))).
-# ---------------------------------------------------------------------------
 
 class CoordEmbed(eqx.Module):
     half_length: Optional[float] = eqx.field(static=True)
@@ -498,9 +489,7 @@ def smooth_l1(x, beta: float = 1.0):
     return jnp.where(ax < beta, 0.5 * x ** 2 / beta, ax - 0.5 * beta)
 
 
-# ---------------------------------------------------------------------------
-# training
-# ---------------------------------------------------------------------------
+### training
 
 @dataclass
 class TrainConfig:
@@ -532,13 +521,6 @@ class TrainConfig:
 
 class Trainer:
     def __init__(self, cfg: TrainConfig, device=None):
-        """Everything below is built under `jax.default_device(self.device)`,
-        not just `device_put` at the end -- see `_solve_reference_impl`'s
-        docstring for why a `dev`-less array construction followed by a
-        trailing `device_put` is not equivalent when more than one device is
-        visible to the process (only matters when CUDA_VISIBLE_DEVICES exposes
-        more than one GPU; harmless otherwise, since JAX's default device then
-        already coincides with `self.device`)."""
         self.cfg = cfg
         self.device = device or pick_device()
         with jax.default_device(self.device):
@@ -578,15 +560,6 @@ class Trainer:
         self.train_time = None
 
     def _fit_velocity_proposal(self):
-        """A one-off fit of the velocity marginal's mean/std, used only to
-        centre the importance-sampling proposal -- NOT part of the repeated
-        per-step field solve. Deliberately evaluated on a small grid capped
-        independently of field_nx/field_nv: those are meant to scale (e.g. to
-        compare training cost against the classical solver's O(N^4) grid at
-        matched resolution), and letting this one-off fit's O(N^4) mesh scale
-        with them would contaminate that comparison with a setup cost that
-        has nothing to do with training.
-        """
         p, cfg = self.problem, self.cfg
         fit_n = min(cfg.field_nx, cfg.field_nv, 24)
         x_grid = uniform_grid(p.x_lo, p.x_hi, fit_n)
@@ -699,12 +672,6 @@ class Trainer:
         return train_step
 
     def train(self, iters: Optional[int] = None) -> None:
-        """Keeps every step's metrics as an on-device pytree while the loop
-        runs -- converting to Python floats (`float(v)`) forces a host sync,
-        and doing that every iteration would serialize JAX's normally
-        asynchronous dispatch (a bigger relative tax here than in PyTorch,
-        which is synchronous per-op anyway). Only `log_every` steps and the
-        final bulk conversion below actually block."""
         iters = iters or self.cfg.iters
         raw_history = []
         t0 = time.time()
@@ -751,15 +718,14 @@ def n_params(model) -> int:
     return sum(int(np.prod(l.shape)) for l in leaves)
 
 
-# ---------------------------------------------------------------------------
-# classical reference solver: 4D Strang-splitting spectral semi-Lagrangian.
+
+### classical reference solver: 4D Strang-splitting spectral semi-Lagrangian.
 #
 # jax.lax.scan over static-length segments between save points (segment
 # boundaries are known ahead of time from n_steps/save_times, all Python
 # ints). No manual memory "slabbing" -- XLA fuses the FFT/elementwise chain
 # and plans its own buffer reuse; the un-chunked array at large N is exactly
 # what should hit the real GPU memory wall (see GPU->CPU fallback below).
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ReferenceSolution:
@@ -810,14 +776,6 @@ def _march_segment(f, kx, kv, v, length, dv2, has_field, dt, n_steps):
 
 def _solve_reference_impl(problem: Problem, nx: int, nv: int, dt: float,
                           save_times, dtype, dev):
-    """Everything -- grids, the meshgrid/f0 evaluation that builds the initial
-    (nx,nx,nv,nv) state, and every scan step -- must be constructed under
-    `dev` from the very first array, not moved there afterwards: a `dev`-less
-    `jnp.meshgrid`/`f0(z)` runs on JAX's default device (the GPU) regardless
-    of what `dev` says, so a "retry on CPU" that only `device_put`s the
-    *finished* array at the end still tries to build that array on the
-    already-OOM'd GPU first, and fails there instead of ever reaching the CPU.
-    """
     with jax.default_device(dev):
         length = problem.length
         x = uniform_grid(problem.x_lo, problem.x_hi, nx, dtype=dtype)
@@ -860,12 +818,6 @@ def _solve_reference_impl(problem: Problem, nx: int, nv: int, dt: float,
 
 def solve_reference(problem: Problem, nx=48, nv=48, dt=1.0 / 64.0, save_times=None,
                     device: str = "auto", dtype=F64) -> ReferenceSolution:
-    """Strang-splitting spectral semi-Lagrangian solve with GPU->CPU fallback.
-
-    On a RESOURCE_EXHAUSTED error the whole solve is retried on CPU -- host RAM
-    is far larger than a single GPU here, so this is exactly the wall the
-    classical solver hits at large N that the flow map does not.
-    """
     save_times = save_times if save_times is not None else (problem.plot_times or [problem.t_final])
     dev = pick_device(None if device == "auto" else device)
     try:
@@ -942,9 +894,7 @@ def run_resolution_sweep(problem_name: str, grid_sizes, n_steps: int = 8,
     return rows
 
 
-# ---------------------------------------------------------------------------
-# diagnostics
-# ---------------------------------------------------------------------------
+### diagnostics
 
 @dataclass
 class Conservation:
@@ -1043,12 +993,10 @@ def use_paper_style() -> None:
     })
 
 
-# ---------------------------------------------------------------------------
 # meshless Poisson ablation (stretch, not wired into the headline Trainer):
 # truncated Fourier-mode Monte Carlo estimate of rho_hat(k), reconstructing E
 # by explicit truncated Fourier synthesis -- no spatial grid at all, not even
 # the small fixed one above. See the notebook for the validation-vs-grid cell.
-# ---------------------------------------------------------------------------
 
 def fourier_modes(k_max: int, length: float, dtype=F32):
     ks = jnp.arange(-k_max, k_max + 1, dtype=dtype) * (2.0 * jnp.pi / length)
@@ -1075,11 +1023,9 @@ def e_from_fourier_modes(rho_hat, kx, ky, xq):
     return jnp.stack([ex, ey], axis=-1)
 
 
-# ---------------------------------------------------------------------------
-# CLI: `python slpinn_2d2v_jax.py --bench-one-n N ...` runs one resolution of
+# CLI: `python slpinn_2d2v_jax.py --bench-one-n N ...` runs one resolution of 
 # the classical solver in its own process and prints one JSON row to stdout
 # (used by run_resolution_sweep's subprocess-per-N driver).
-# ---------------------------------------------------------------------------
 
 def _main():
     import argparse
